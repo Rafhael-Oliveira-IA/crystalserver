@@ -69,7 +69,8 @@ bool ConfigManager::load() {
 		loadIntConfig(L, MARKET_REFRESH_PRICES, "marketRefreshPricesInterval", 30);
 		loadIntConfig(L, PREMIUM_DEPOT_LIMIT, "premiumDepotLimit", 8000);
 		loadIntConfig(L, SQL_PORT, "mysqlPort", 3306);
-		loadIntConfig(L, STATUS_PORT, "statusProtocolPort", 7171);
+		loadIntConfig(L, STATUS_PORT, "statusProtocolPort", 7173);
+		loadIntConfig(L, WORLD_ID, "worldId", 1);
 
 		loadStringConfig(L, AUTH_TYPE, "authType", "password");
 		loadStringConfig(L, HOUSE_RENT_PERIOD, "houseRentPeriod", "never");
@@ -438,6 +439,8 @@ bool ConfigManager::load() {
 	loadStringConfig(L, STORE_IMAGES_URL, "coinImagesURL", "");
 	loadStringConfig(L, TIBIADROME_CONCOCTION_TICK_TYPE, "tibiadromeConcoctionTickType", "online");
 	loadStringConfig(L, URL, "url", "");
+	loadStringConfig(L, WEEKLY_TASKS_RESET_DAY, "weeklyTasksResetDay", "monday");
+	loadStringConfig(L, WORLD_LOCATION, "worldLocation", "South America");
 	loadStringConfig(L, WEEKLY_TASKS_RESET_DAY, "weeklyTasksResetDay", "monday");
 	loadStringConfig(L, WORLD_TYPE, "worldType", "pvp");
 
