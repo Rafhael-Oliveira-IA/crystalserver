@@ -16,6 +16,7 @@
 ////////////////////////////////////////////////////////////////////////
 
 #include "server/network/protocol/protocolgame.hpp"
+#include "server/network/protocol/battlepass_config.hpp"
 
 #include "account/account.hpp"
 #include "config/configmanager.hpp"
@@ -74,6 +75,10 @@
 #include "enums/container_type.hpp"
 #include "enums/player_wheel.hpp"
 
+#include <ctime>
+#include <limits>
+#include <array>
+
 /*
  * NOTE: This namespace is used so that we can add functions without having to declare them in the ".hpp/.hpp" file
  * Do not use functions only in the .cpp scope without having a namespace, it may conflict with functions in other files of the same name
@@ -82,6 +87,71 @@
 // This "getIteration" function will allow us to get the total number of iterations that run within a specific map
 // Very useful to send the total amount in certain bytes in the ProtocolGame class
 namespace {
+	constexpr uint8_t BATTLEPASS_CLIENT_OPCODE = 0x36;
+	constexpr uint8_t BATTLEPASS_SERVER_OPCODE = 0x37;
+
+	enum BattlePassRequest_t : uint8_t {
+		BATTLEPASS_REQUEST_GET_MISSIONS = 1,
+		BATTLEPASS_REQUEST_GET_REWARDS = 2,
+		BATTLEPASS_REQUEST_REROLL = 3,
+		BATTLEPASS_REQUEST_REDEEM = 4,
+		BATTLEPASS_REQUEST_BUY_PREMIUM = 5,
+	};
+
+	enum BattlePassResponse_t : uint8_t {
+		BATTLEPASS_RESPONSE_MISSIONS = 1,
+		BATTLEPASS_RESPONSE_REWARDS = 2,
+		BATTLEPASS_RESPONSE_ERROR = 3,
+	};
+
+	uint32_t getBattlePassSeasonId() {
+		const std::time_t now = std::time(nullptr);
+		const std::tm* tmNow = std::localtime(&now);
+		if (!tmNow) {
+			return 197001;
+		}
+
+		const uint32_t year = static_cast<uint32_t>(tmNow->tm_year + 1900);
+		const uint32_t month = static_cast<uint32_t>(tmNow->tm_mon + 1);
+		return year * 100 + month;
+	}
+
+	bool isBattlePassPremiumActive(const std::shared_ptr<Player> &player, uint32_t seasonId) {
+		if (!player) {
+			return false;
+		}
+
+		const uint32_t premiumKey = battlepass::getPremiumStorageKey(seasonId);
+		return player->getStorageValue(premiumKey) > 0;
+	}
+
+	uint32_t getBattlePassRerollCount(const std::shared_ptr<Player> &player, uint32_t seasonId) {
+		if (!player) {
+			return 0;
+		}
+
+		const uint32_t rerollKey = battlepass::getRerollStorageKey(seasonId);
+		return static_cast<uint32_t>(std::max<int32_t>(0, player->getStorageValue(rerollKey)));
+	}
+
+	bool isBattlePassRewardClaimed(const std::shared_ptr<Player> &player, uint32_t seasonId, uint32_t rewardId) {
+		if (!player) {
+			return false;
+		}
+
+		const uint32_t key = battlepass::getClaimedStorageKey(seasonId, rewardId);
+		return player->getStorageValue(key) > 0;
+	}
+
+	void markBattlePassRewardClaimed(const std::shared_ptr<Player> &player, uint32_t seasonId, uint32_t rewardId) {
+		if (!player) {
+			return;
+		}
+
+		const uint32_t key = battlepass::getClaimedStorageKey(seasonId, rewardId);
+		player->addStorageValue(key, 1);
+	}
+
 	template <typename T>
 	uint16_t getVectorIterationIncreaseCount(T &vector) {
 		uint16_t totalIterationCount = 0;
@@ -1201,6 +1271,9 @@ void ProtocolGame::parsePacketFromDispatcher(NetworkMessage &msg, uint8_t recvby
 		case 0x32:
 			parseExtendedOpcode(msg);
 			break; // otclient extended opcode
+		case BATTLEPASS_CLIENT_OPCODE:
+			parseBattlePassAction(msg);
+			break;
 		case 0x38:
 			parsePlayerTyping(msg); // player are typing or not
 			break;
@@ -1899,7 +1972,46 @@ void ProtocolGame::parseSetOutfit(NetworkMessage &msg) {
 	}
 
 	if (msg.getBufferPosition() == startBufferPosition) {
+		const auto logOutfit = [&](const char* stage, const Outfit_t &outfit, bool isMounted, bool randomizeMount) {
+			g_logger().info(
+				"[OutfitTrace][Server][{}] player={} type={} lookType={} addons={} colors=({},{},{},{}) mount={} mountColors=({},{},{},{}) mounted={} randomize={} familiar={} wing={} aura={} effect={} shader={}",
+				stage,
+				player->getName(),
+				!oldProtocol ? 1 : 0,
+				outfit.lookType,
+				static_cast<uint16_t>(outfit.lookAddons),
+				static_cast<uint16_t>(outfit.lookHead),
+				static_cast<uint16_t>(outfit.lookBody),
+				static_cast<uint16_t>(outfit.lookLegs),
+				static_cast<uint16_t>(outfit.lookFeet),
+				outfit.lookMount,
+				static_cast<uint16_t>(outfit.lookMountHead),
+				static_cast<uint16_t>(outfit.lookMountBody),
+				static_cast<uint16_t>(outfit.lookMountLegs),
+				static_cast<uint16_t>(outfit.lookMountFeet),
+				isMounted ? 1 : 0,
+				randomizeMount ? 1 : 0,
+				outfit.lookFamiliarsType,
+				outfit.lookWing,
+				outfit.lookAura,
+				outfit.lookEffect,
+				outfit.lookShader
+			);
+		};
+
+		const auto ensureReadable = [&](size_t bytes) {
+			return msg.canRead(bytes);
+		};
+
+		const size_t baseBytes = oldProtocol ? 7 : 8;
+		if (!ensureReadable(baseBytes)) {
+			g_logger().warn("[OutfitTrace][Server][parseSetOutfit] player={} dropped: base payload too short", player->getName());
+			return;
+		}
+
 		uint8_t outfitType = !oldProtocol ? msg.getByte() : 0;
+		g_logger().info("[OutfitTrace][Server][parseSetOutfit] player={} received outfitType={} pos={}", player->getName(), static_cast<uint16_t>(outfitType), msg.getBufferPosition());
+
 		Outfit_t newOutfit;
 		newOutfit.lookType = msg.get<uint16_t>();
 		newOutfit.lookHead = std::min<uint8_t>(132, msg.getByte());
@@ -1908,41 +2020,79 @@ void ProtocolGame::parseSetOutfit(NetworkMessage &msg) {
 		newOutfit.lookFeet = std::min<uint8_t>(132, msg.getByte());
 		newOutfit.lookAddons = msg.getByte();
 		if (outfitType == 0) {
+			if (!ensureReadable(2)) {
+				logOutfit("parseSetOutfit/type0/baseOnly", newOutfit, false, false);
+				g_game().playerChangeOutfit(player->getID(), newOutfit, false, false);
+				return;
+			}
+
 			newOutfit.lookMount = msg.get<uint16_t>();
 			if (!oldProtocol) {
-				newOutfit.lookMountHead = std::min<uint8_t>(132, msg.getByte());
-				newOutfit.lookMountBody = std::min<uint8_t>(132, msg.getByte());
-				newOutfit.lookMountLegs = std::min<uint8_t>(132, msg.getByte());
-				newOutfit.lookMountFeet = std::min<uint8_t>(132, msg.getByte());
+				bool isMounted = newOutfit.lookMount != 0;
+				bool randomizeMount = false;
 
-				bool isMounted = msg.getByte();
-				newOutfit.lookFamiliarsType = msg.get<uint16_t>();
-				g_logger().debug("Bool isMounted: {}", isMounted);
+				// Some clients (or death/legacy flows) send only lookMount and omit
+				// mount color/state extensions. Parse them only when present.
+				if (msg.canRead(4)) {
+					newOutfit.lookMountHead = std::min<uint8_t>(132, msg.getByte());
+					newOutfit.lookMountBody = std::min<uint8_t>(132, msg.getByte());
+					newOutfit.lookMountLegs = std::min<uint8_t>(132, msg.getByte());
+					newOutfit.lookMountFeet = std::min<uint8_t>(132, msg.getByte());
+				}
 
-				bool randomizeMount = msg.getByte() == 0x01;
+				if (msg.canRead(1)) {
+					isMounted = msg.getByte() != 0;
+				}
+
+				if (msg.canRead(2)) {
+					newOutfit.lookFamiliarsType = msg.get<uint16_t>();
+				}
+
+				if (msg.canRead(1)) {
+					randomizeMount = msg.getByte() == 0x01;
+				}
 
 				if (isOTCR) {
 					// g_game.enableFeature(GameWingsAurasEffectsShader)
-					newOutfit.lookWing = msg.get<uint16_t>();
-					newOutfit.lookAura = msg.get<uint16_t>();
-					newOutfit.lookEffect = msg.get<uint16_t>();
-					std::string shaderName = msg.getString();
-					if (!shaderName.empty()) {
-						const auto &shader = g_game().getAttachedEffects()->getShaderByName(shaderName);
-						newOutfit.lookShader = shader ? shader->id : 0;
+					if (msg.canRead(6)) {
+						newOutfit.lookWing = msg.get<uint16_t>();
+						newOutfit.lookAura = msg.get<uint16_t>();
+						newOutfit.lookEffect = msg.get<uint16_t>();
+					}
+
+					if (msg.canRead(2)) {
+						std::string shaderName = msg.getString();
+						if (!shaderName.empty()) {
+							const auto &shader = g_game().getAttachedEffects()->getShaderByName(shaderName);
+							newOutfit.lookShader = shader ? shader->id : 0;
+						}
 					}
 				}
 
+				logOutfit("parseSetOutfit/type0/final", newOutfit, isMounted, randomizeMount);
 				g_game().playerChangeOutfit(player->getID(), newOutfit, isMounted, randomizeMount);
 			} else {
+				logOutfit("parseSetOutfit/type0/legacy", newOutfit, false, false);
 				g_game().playerChangeOutfit(player->getID(), newOutfit, false, 0);
 			}
 		} else if (outfitType == 1) {
+			if (!ensureReadable(4)) {
+				g_logger().warn("[OutfitTrace][Server][parseSetOutfit] player={} dropped: outfitType=1 payload too short", player->getName());
+				return;
+			}
+
 			// This value probably has something to do with try outfit variable inside outfit window dialog
 			// if try outfit is set to 2 it expects uint32_t value after mounted and disable mounts from outfit window dialog
 			newOutfit.lookMount = 0;
 			msg.get<uint32_t>();
+			logOutfit("parseSetOutfit/type1/final", newOutfit, false, false);
+			g_game().playerChangeOutfit(player->getID(), newOutfit, false, false);
 		} else if (outfitType == 2) {
+			if (!ensureReadable(16)) {
+				g_logger().warn("[OutfitTrace][Server][parseSetOutfit] player={} dropped: outfitType=2 payload too short", player->getName());
+				return;
+			}
+
 			Position pos = msg.getPosition();
 			auto itemId = msg.get<uint16_t>();
 			uint8_t stackpos = msg.getByte();
@@ -1954,12 +2104,15 @@ void ProtocolGame::parseSetOutfit(NetworkMessage &msg) {
 			uint8_t direction = std::max<uint8_t>(DIRECTION_NORTH, std::min<uint8_t>(DIRECTION_WEST, msg.getByte()));
 			uint8_t podiumVisible = msg.getByte();
 			g_game().playerSetShowOffSocket(player->getID(), newOutfit, pos, stackpos, itemId, podiumVisible, direction);
+		} else {
+			g_logger().warn("[OutfitTrace][Server][parseSetOutfit] player={} unknown outfitType={}", player->getName(), static_cast<uint16_t>(outfitType));
 		}
 	}
 }
 
 void ProtocolGame::parseToggleMount(NetworkMessage &msg) {
 	bool mount = msg.getByte() != 0;
+	g_logger().info("[OutfitTrace][Server][parseToggleMount] player={} mountFlag={}", player ? player->getName() : "<null>", mount ? 1 : 0);
 	g_game().playerToggleMount(player->getID(), mount);
 }
 
@@ -3352,6 +3505,289 @@ void ProtocolGame::parsePreyAction(NetworkMessage &msg) {
 	g_game().playerPreyAction(player->getID(), slot, action, option, index, raceId);
 }
 
+void ProtocolGame::parseBattlePassAction(NetworkMessage &msg) {
+	if (!player || oldProtocol) {
+		return;
+	}
+
+	const uint8_t request = msg.getByte();
+	const uint32_t seasonId = getBattlePassSeasonId();
+	switch (request) {
+		case BATTLEPASS_REQUEST_GET_MISSIONS:
+			sendBattlePassMissionsData();
+			break;
+		case BATTLEPASS_REQUEST_GET_REWARDS:
+			sendBattlePassRewardsData();
+			break;
+		case BATTLEPASS_REQUEST_REROLL: {
+			msg.getString(); // missionId (reserved for future mission-targeted reroll)
+
+			const uint64_t rerollCost = static_cast<uint64_t>(battlepass::getRerollBasePrice()) * std::max<uint32_t>(1, player->getLevel());
+			if (!g_game().removeMoney(player, rerollCost, 0, true)) {
+				sendBattlePassError("Not enough gold to reroll this mission.");
+				break;
+			}
+
+			const uint32_t rerollKey = battlepass::getRerollStorageKey(seasonId);
+			const int32_t current = std::max<int32_t>(0, player->getStorageValue(rerollKey));
+			player->addStorageValue(rerollKey, current + 1);
+
+			player->sendTextMessage(MESSAGE_STATUS, "Battle Pass mission rerolled.");
+			sendBattlePassMissionsData();
+			break;
+		}
+		case BATTLEPASS_REQUEST_REDEEM: {
+			const uint16_t stepId = msg.get<uint16_t>();
+			const uint32_t rewardId = msg.get<uint32_t>();
+			msg.get<uint32_t>(); // objectId (used by selectable rewards)
+
+			if (stepId == 0 || stepId > battlepass::getMaxStep()) {
+				sendBattlePassError("Invalid Battle Pass reward step.");
+				break;
+			}
+
+			const uint32_t points = static_cast<uint32_t>(
+				std::min<uint64_t>(player->getTaskHuntingPoints(), std::numeric_limits<uint32_t>::max())
+			);
+			const uint16_t currentStep = static_cast<uint16_t>(
+				std::min<uint32_t>(points / battlepass::getStepPoints(), battlepass::getMaxStep())
+			);
+			if (stepId > currentStep) {
+				sendBattlePassError("This reward is still locked.");
+				break;
+			}
+
+			const uint32_t freeRewardId = battlepass::buildRewardId(stepId, false);
+			const uint32_t premiumRewardId = battlepass::buildRewardId(stepId, true);
+			const bool isPremiumReward = rewardId == premiumRewardId;
+			if (rewardId != freeRewardId && rewardId != premiumRewardId) {
+				sendBattlePassError("Invalid Battle Pass reward id.");
+				break;
+			}
+
+			if (isPremiumReward && !isBattlePassPremiumActive(player, seasonId)) {
+				sendBattlePassError("Premium Battle Pass is required for this reward.");
+				break;
+			}
+
+			if (isBattlePassRewardClaimed(player, seasonId, rewardId)) {
+				sendBattlePassError("Reward already claimed.");
+				break;
+			}
+
+			const auto catalog = battlepass::getRewardCatalogEntry(stepId);
+			const uint16_t itemId = isPremiumReward ? catalog.premiumItemId : catalog.freeItemId;
+			const uint16_t itemCount = isPremiumReward ? catalog.premiumCount : catalog.freeCount;
+			auto rewardItem = Item::CreateItem(itemId, itemCount);
+			if (!rewardItem) {
+				sendBattlePassError("Unable to create reward item.");
+				break;
+			}
+
+			const auto addResult = g_game().internalPlayerAddItem(player, rewardItem, true, CONST_SLOT_WHEREEVER);
+			if (addResult != RETURNVALUE_NOERROR) {
+				sendBattlePassError("Not enough capacity/space to receive the reward.");
+				break;
+			}
+
+			markBattlePassRewardClaimed(player, seasonId, rewardId);
+			player->sendTextMessage(MESSAGE_STATUS, "Battle Pass reward claimed successfully.");
+			sendBattlePassRewardsData();
+			sendBattlePassMissionsData();
+			break;
+		}
+		case BATTLEPASS_REQUEST_BUY_PREMIUM: {
+			if (isBattlePassPremiumActive(player, seasonId)) {
+				sendBattlePassError("Premium Battle Pass is already active.");
+				break;
+			}
+
+			if (!g_game().removeMoney(player, battlepass::getPremiumPrice(), 0, true)) {
+				sendBattlePassError("Not enough gold to buy Premium Battle Pass.");
+				break;
+			}
+
+			const uint32_t premiumKey = battlepass::getPremiumStorageKey(seasonId);
+			player->addStorageValue(premiumKey, 1);
+			player->sendTextMessage(MESSAGE_STATUS, "Premium Battle Pass activated.");
+			sendBattlePassMissionsData();
+			sendBattlePassRewardsData();
+			break;
+		}
+		default:
+			g_logger().warn("[ProtocolGame::parseBattlePassAction] - Unknown request: {}", request);
+			sendBattlePassError("Unknown Battle Pass request.");
+			break;
+	}
+}
+
+void ProtocolGame::sendBattlePassMissionsData() {
+	if (!player || oldProtocol) {
+		return;
+	}
+
+	NetworkMessage msg;
+	msg.addByte(BATTLEPASS_SERVER_OPCODE);
+	msg.addByte(BATTLEPASS_RESPONSE_MISSIONS);
+
+	Outfit_t outfit = player->getCurrentOutfit();
+	if (outfit.lookType == 0) {
+		outfit = player->getDefaultOutfit();
+	}
+	msg.add<uint16_t>(outfit.lookType);
+	msg.addByte(outfit.lookHead);
+	msg.addByte(outfit.lookBody);
+	msg.addByte(outfit.lookLegs);
+	msg.addByte(outfit.lookFeet);
+	msg.addByte(outfit.lookAddons);
+
+	const uint32_t now = static_cast<uint32_t>(std::time(nullptr));
+	const uint32_t seasonDuration = battlepass::getSeasonDurationSeconds();
+	const uint32_t dailyDuration = battlepass::getDailyDurationSeconds();
+	const uint32_t seasonId = getBattlePassSeasonId();
+	const uint32_t rerollCount = getBattlePassRerollCount(player, seasonId);
+	const uint32_t rerollPrice = static_cast<uint32_t>(battlepass::getRerollBasePrice() + (rerollCount * 25));
+	const uint32_t points = static_cast<uint32_t>(
+		std::min<uint64_t>(player->getTaskHuntingPoints(), std::numeric_limits<uint32_t>::max())
+	);
+	const uint16_t rewardStep = static_cast<uint16_t>(
+		std::min<uint32_t>(points / battlepass::getStepPoints(), battlepass::getMaxStep())
+	);
+
+	msg.add<uint32_t>(now); // beginTime
+	msg.add<uint32_t>(now + seasonDuration); // endTime
+	msg.add<uint32_t>(points);
+	msg.add<uint32_t>(rerollPrice); // rerollPrice
+	msg.add<uint32_t>(battlepass::getPremiumPrice()); // deluxePrice
+	msg.addByte(isBattlePassPremiumActive(player, seasonId) ? 1 : 0); // battlePassActive
+	msg.add<uint16_t>(rewardStep);
+	msg.add<uint32_t>(battlepass::getStepPoints()); // nextStepPoints
+	msg.add<uint32_t>(now); // dailyBeginTime
+	msg.add<uint32_t>(now + dailyDuration); // dailyEndTime
+
+	std::vector<std::tuple<std::string, std::string, std::string, uint32_t, uint32_t, uint16_t>> dailyMissions;
+	std::vector<std::tuple<std::string, std::string, std::string, uint32_t, uint32_t, uint16_t>> generalMissions;
+
+	const auto &bountyData = player->getBountyTaskData();
+	if (bountyData.state == BOUNTY_STATE_ACTIVE || bountyData.state == BOUNTY_STATE_COMPLETED) {
+		std::string taskName = "Bounty Hunt";
+		if (const auto mType = g_monsters().getMonsterTypeByRaceId(bountyData.activeTask.raceId)) {
+			taskName = mType->name;
+		}
+
+		dailyMissions.emplace_back(
+			rerollCount % 2 == 0 ? "bounty_active" : "bounty_active_reroll",
+			taskName,
+			rerollCount % 2 == 0 ? "Defeat your active bounty target." : "Rerolled: defeat your active bounty target.",
+			static_cast<uint32_t>(bountyData.activeTask.currentKills),
+			std::max<uint32_t>(1, bountyData.activeTask.requiredKills),
+			100
+		);
+	}
+
+	const auto &weeklyData = player->getWeeklyTaskData();
+	if (weeklyData.anyCreatureTotalKills > 0) {
+		dailyMissions.emplace_back(
+			rerollCount % 2 == 0 ? "weekly_any_kills" : "weekly_any_kills_reroll",
+			"Weekly Hunt",
+			rerollCount % 2 == 0 ? "Defeat creatures for weekly progress." : "Rerolled: defeat creatures for weekly progress.",
+			static_cast<uint32_t>(weeklyData.anyCreatureCurrentKills),
+			static_cast<uint32_t>(weeklyData.anyCreatureTotalKills),
+			200
+		);
+	}
+
+	generalMissions.emplace_back(
+		"task_hunting_points",
+		"Task Hunting Points",
+		"Collect task hunting points.",
+		points,
+		1000,
+		300
+	);
+
+	msg.add<uint16_t>(static_cast<uint16_t>(dailyMissions.size()));
+	for (const auto &[missionId, missionName, missionDescription, currentProgress, maxProgress, rewardPoints] : dailyMissions) {
+		msg.addString(missionId);
+		msg.addString(missionName);
+		msg.addString(missionDescription);
+		msg.add<uint32_t>(currentProgress);
+		msg.add<uint32_t>(std::max<uint32_t>(1, maxProgress));
+		msg.add<uint16_t>(rewardPoints);
+	}
+
+	msg.add<uint16_t>(static_cast<uint16_t>(generalMissions.size()));
+	for (const auto &[missionId, missionName, missionDescription, currentProgress, maxProgress, rewardPoints] : generalMissions) {
+		msg.addString(missionId);
+		msg.addString(missionName);
+		msg.addString(missionDescription);
+		msg.add<uint32_t>(currentProgress);
+		msg.add<uint32_t>(std::max<uint32_t>(1, maxProgress));
+		msg.add<uint16_t>(rewardPoints);
+	}
+
+	writeToOutputBuffer(msg);
+}
+
+void ProtocolGame::sendBattlePassRewardsData() {
+	if (!player || oldProtocol) {
+		return;
+	}
+	const uint32_t seasonId = getBattlePassSeasonId();
+
+	NetworkMessage msg;
+	msg.addByte(BATTLEPASS_SERVER_OPCODE);
+	msg.addByte(BATTLEPASS_RESPONSE_REWARDS);
+	msg.addByte(0); // chunk=false
+	msg.add<uint16_t>(1); // first
+	msg.add<uint16_t>(battlepass::getMaxStep()); // total
+	msg.add<uint16_t>(battlepass::getMaxStep()); // stepCount
+
+	for (uint16_t stepId = 1; stepId <= battlepass::getMaxStep(); ++stepId) {
+		msg.add<uint16_t>(stepId);
+		msg.addByte(2); // free + premium
+		const auto catalog = battlepass::getRewardCatalogEntry(stepId);
+
+		for (uint8_t rewardIndex = 0; rewardIndex < 2; ++rewardIndex) {
+			const bool premiumReward = rewardIndex == 1;
+			const auto rewardId = battlepass::buildRewardId(stepId, premiumReward);
+			const uint8_t rewardType = premiumReward ? catalog.premiumRewardType : catalog.freeRewardType;
+			const uint16_t itemId = premiumReward ? catalog.premiumItemId : catalog.freeItemId;
+			const uint16_t itemCount = premiumReward ? catalog.premiumCount : catalog.freeCount;
+
+			msg.add<uint32_t>(rewardId);
+			msg.addByte(rewardType);
+			msg.addByte(premiumReward ? 0 : 1); // freeReward bool
+			msg.add<uint16_t>(itemId);
+			msg.add<uint16_t>(itemCount);
+			msg.add<uint16_t>(0); // charges
+			msg.addByte(0); // stuck
+			msg.addByte(isBattlePassRewardClaimed(player, seasonId, rewardId) ? 1 : 0); // claimed
+			msg.add<uint32_t>(0); // duration
+			msg.addByte(0); // addons
+
+			msg.add<uint16_t>(0); // randomValues count
+			msg.add<uint16_t>(0); // choosableValues count
+			msg.addByte(0); // maleOutfit groups
+			msg.addByte(0); // femaleOutfit groups
+			msg.add<uint16_t>(0); // multi items count
+		}
+	}
+	writeToOutputBuffer(msg);
+}
+
+void ProtocolGame::sendBattlePassError(const std::string &message) {
+	if (!player || oldProtocol) {
+		return;
+	}
+
+	NetworkMessage msg;
+	msg.addByte(BATTLEPASS_SERVER_OPCODE);
+	msg.addByte(BATTLEPASS_RESPONSE_ERROR);
+	msg.addString(message);
+	writeToOutputBuffer(msg);
+}
+
 void ProtocolGame::parseBountyTaskAction(NetworkMessage &msg) {
 	if (!player || oldProtocol) {
 		return;
@@ -3652,15 +4088,27 @@ void ProtocolGame::parseQuestLine(NetworkMessage &msg) {
 }
 
 void ProtocolGame::parseMarketLeave() {
+	g_logger().info("[MarketTrace][Server][Protocol][parseMarketLeave] player={} id={} inMarketBefore={}",
+				player ? player->getName() : "<null>",
+				player ? player->getID() : 0,
+				player && player->isInMarket() ? 1 : 0);
 	g_game().playerLeaveMarket(player->getID());
 }
 
 void ProtocolGame::parseMarketBrowse(NetworkMessage &msg) {
 	uint16_t browseId = oldProtocol ? msg.get<uint16_t>() : static_cast<uint16_t>(msg.getByte());
+	g_logger().info("[MarketTrace][Server][Protocol][parseMarketBrowse] player={} id={} browseId={} inMarket={} oldProtocol={}",
+				player ? player->getName() : "<null>",
+				player ? player->getID() : 0,
+				browseId,
+				player && player->isInMarket() ? 1 : 0,
+				oldProtocol ? 1 : 0);
 
 	if ((oldProtocol && browseId == MARKETREQUEST_OWN_OFFERS_OLD) || (!oldProtocol && browseId == MARKETREQUEST_OWN_OFFERS)) {
+		g_logger().info("[MarketTrace][Server][Protocol][parseMarketBrowse] ownOffers request");
 		g_game().playerBrowseMarketOwnOffers(player->getID());
 	} else if ((oldProtocol && browseId == MARKETREQUEST_OWN_HISTORY_OLD) || (!oldProtocol && browseId == MARKETREQUEST_OWN_HISTORY)) {
+		g_logger().info("[MarketTrace][Server][Protocol][parseMarketBrowse] ownHistory request");
 		g_game().playerBrowseMarketOwnHistory(player->getID());
 	} else if (!oldProtocol) {
 		auto itemId = msg.get<uint16_t>();
@@ -3668,9 +4116,13 @@ void ProtocolGame::parseMarketBrowse(NetworkMessage &msg) {
 		if (Item::items[itemId].upgradeClassification > 0) {
 			tier = msg.get<uint8_t>();
 		}
+		g_logger().info("[MarketTrace][Server][Protocol][parseMarketBrowse] itemBrowse itemId={} tier={} sendingMarketEnterAgain=1",
+				itemId,
+				static_cast<uint16_t>(tier));
 		player->sendMarketEnter(player->getLastDepotId());
 		g_game().playerBrowseMarket(player->getID(), itemId, tier);
 	} else {
+		g_logger().info("[MarketTrace][Server][Protocol][parseMarketBrowse] legacyItemBrowse itemId={}", browseId);
 		g_game().playerBrowseMarket(player->getID(), browseId, 0);
 	}
 }
@@ -3686,6 +4138,15 @@ void ProtocolGame::parseMarketCreateOffer(NetworkMessage &msg) {
 	auto amount = msg.get<uint16_t>();
 	uint64_t price = oldProtocol ? static_cast<uint64_t>(msg.get<uint32_t>()) : msg.get<uint64_t>();
 	bool anonymous = (msg.getByte() != 0);
+	g_logger().info("[MarketTrace][Server][Protocol][parseMarketCreateOffer] player={} type={} itemId={} tier={} amount={} price={} anonymous={} inMarket={}",
+				player ? player->getName() : "<null>",
+				static_cast<uint16_t>(type),
+				itemId,
+				static_cast<uint16_t>(itemTier),
+				amount,
+				price,
+				anonymous ? 1 : 0,
+				player && player->isInMarket() ? 1 : 0);
 	if (amount > 0 && price > 0) {
 		g_game().playerCreateMarketOffer(player->getID(), type, itemId, amount, price, itemTier, anonymous);
 	}
@@ -3694,6 +4155,11 @@ void ProtocolGame::parseMarketCreateOffer(NetworkMessage &msg) {
 void ProtocolGame::parseMarketCancelOffer(NetworkMessage &msg) {
 	auto timestamp = msg.get<uint32_t>();
 	auto counter = msg.get<uint16_t>();
+	g_logger().info("[MarketTrace][Server][Protocol][parseMarketCancelOffer] player={} timestamp={} counter={} inMarket={}",
+				player ? player->getName() : "<null>",
+				timestamp,
+				counter,
+				player && player->isInMarket() ? 1 : 0);
 	if (counter > 0) {
 		g_game().playerCancelMarketOffer(player->getID(), timestamp, counter);
 	}
@@ -3705,6 +4171,12 @@ void ProtocolGame::parseMarketAcceptOffer(NetworkMessage &msg) {
 	auto timestamp = msg.get<uint32_t>();
 	auto counter = msg.get<uint16_t>();
 	auto amount = msg.get<uint16_t>();
+	g_logger().info("[MarketTrace][Server][Protocol][parseMarketAcceptOffer] player={} timestamp={} counter={} amount={} inMarket={}",
+				player ? player->getName() : "<null>",
+				timestamp,
+				counter,
+				amount,
+				player && player->isInMarket() ? 1 : 0);
 	if (amount > 0 && counter > 0) {
 		g_game().playerAcceptMarketOffer(player->getID(), timestamp, counter, amount);
 	}
@@ -6041,6 +6513,11 @@ void ProtocolGame::sendSaleItemList(const std::vector<ShopBlock> &shopVector, co
 }
 
 void ProtocolGame::sendMarketEnter(uint32_t depotId) {
+	g_logger().info("[MarketTrace][Server][Protocol][sendMarketEnter] player={} id={} depotId={} inMarketBefore={}",
+				player ? player->getName() : "<null>",
+				player ? player->getID() : 0,
+				depotId,
+				player && player->isInMarket() ? 1 : 0);
 	NetworkMessage msg;
 	msg.addByte(0xF6);
 
@@ -6058,6 +6535,7 @@ void ProtocolGame::sendMarketEnter(uint32_t depotId) {
 	}
 
 	player->setInMarket(true);
+	g_logger().info("[MarketTrace][Server][Protocol][sendMarketEnter] player={} inMarketAfterSet=1", player ? player->getName() : "<null>");
 
 	// Only use here locker items, itemVector is for use of Game::createMarketOffer
 	auto [itemVector, lockerItems] = player->requestLockerItems(depotLocker, true);
@@ -6079,6 +6557,7 @@ void ProtocolGame::sendMarketEnter(uint32_t depotId) {
 	}
 
 	writeToOutputBuffer(msg);
+	g_logger().info("[MarketTrace][Server][Protocol][sendMarketEnter] player={} sentItems={}", player ? player->getName() : "<null>", totalItems);
 
 	updateCoinBalance();
 	sendResourcesBalance(player->getMoney(), player->getBankBalance(), player->getPreyCards(), player->getTaskHuntingPoints(), player->getSoulsealsPoints());
@@ -6134,6 +6613,10 @@ void ProtocolGame::updateCoinBalance() {
 }
 
 void ProtocolGame::sendMarketLeave() {
+	g_logger().info("[MarketTrace][Server][Protocol][sendMarketLeave] player={} id={} inMarketNow={}",
+				player ? player->getName() : "<null>",
+				player ? player->getID() : 0,
+				player && player->isInMarket() ? 1 : 0);
 	NetworkMessage msg;
 	msg.addByte(0xF7);
 	writeToOutputBuffer(msg);

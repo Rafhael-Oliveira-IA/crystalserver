@@ -1,4 +1,5 @@
 target_sources(${PROJECT_NAME}_lib PRIVATE
+    network/protocol/battlepass_config.cpp
     network/connection/connection.cpp
     network/message/networkmessage.cpp
     network/message/outputmessage.cpp

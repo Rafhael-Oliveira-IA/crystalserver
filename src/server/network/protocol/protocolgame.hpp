@@ -196,6 +196,7 @@ private:
 	void parseBugReport(NetworkMessage &msg);
 	void parseOfferDescription(NetworkMessage &msg);
 	void parsePreyAction(NetworkMessage &msg);
+	void parseBattlePassAction(NetworkMessage &msg);
 
 	void parseBountyTaskAction(NetworkMessage &msg);
 	void parseSendResourceBalance();
@@ -403,6 +404,9 @@ private:
 	void sendSoulSealsWindow();
 
 	void sendBountyTaskData(const BountyTaskData &bountyData);
+	void sendBattlePassMissionsData();
+	void sendBattlePassRewardsData();
+	void sendBattlePassError(const std::string &message);
 	void sendWeeklyTaskData(const WeeklyTaskData &weeklyData);
 	void sendHuntingTaskShopData();
 

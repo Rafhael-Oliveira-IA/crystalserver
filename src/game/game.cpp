@@ -6478,13 +6478,21 @@ void Game::playerRequestOutfit(uint32_t playerId) {
 void Game::playerToggleMount(uint32_t playerId, bool mount) {
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[OutfitTrace][Server][playerToggleMount] playerId={} not found", playerId);
 		return;
 	}
 
 	if (!player->canDoExAction()) {
+		g_logger().warn("[OutfitTrace][Server][playerToggleMount] player={} blocked by exAction", player->getName());
 		player->sendCancelMessage(RETURNVALUE_YOUAREEXHAUSTED);
 		return;
 	}
+
+	g_logger().info("[OutfitTrace][Server][playerToggleMount] player={} mountFlag={} currentMount={} isMounted={}",
+		player->getName(),
+		mount ? 1 : 0,
+		static_cast<uint16_t>(player->getCurrentMount()),
+		player->isMounted() ? 1 : 0);
 
 	player->toggleMount(mount);
 	player->setNextExAction(OTSYS_TIME() + g_configManager().getNumber(UI_ACTIONS_DELAY_INTERVAL) - 10);
@@ -6492,15 +6500,41 @@ void Game::playerToggleMount(uint32_t playerId, bool mount) {
 
 void Game::playerChangeOutfit(uint32_t playerId, Outfit_t outfit, bool isMounted /* = false */, bool randomizeMount /* = false*/) {
 	if (!g_configManager().getBoolean(ALLOW_CHANGEOUTFIT)) {
+		g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] blocked by ALLOW_CHANGEOUTFIT=false playerId={}", playerId);
 		return;
 	}
 
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] playerId={} not found", playerId);
 		return;
 	}
 
+	g_logger().info(
+		"[OutfitTrace][Server][playerChangeOutfit][incoming] player={} lookType={} addons={} colors=({},{},{},{}) mount={} mountColors=({},{},{},{}) mounted={} randomize={} familiar={} wing={} aura={} effect={} shader={}",
+		player->getName(),
+		outfit.lookType,
+		static_cast<uint16_t>(outfit.lookAddons),
+		static_cast<uint16_t>(outfit.lookHead),
+		static_cast<uint16_t>(outfit.lookBody),
+		static_cast<uint16_t>(outfit.lookLegs),
+		static_cast<uint16_t>(outfit.lookFeet),
+		outfit.lookMount,
+		static_cast<uint16_t>(outfit.lookMountHead),
+		static_cast<uint16_t>(outfit.lookMountBody),
+		static_cast<uint16_t>(outfit.lookMountLegs),
+		static_cast<uint16_t>(outfit.lookMountFeet),
+		isMounted ? 1 : 0,
+		randomizeMount ? 1 : 0,
+		outfit.lookFamiliarsType,
+		outfit.lookWing,
+		outfit.lookAura,
+		outfit.lookEffect,
+		outfit.lookShader
+	);
+
 	if (!player->changeOutfit(outfit, true)) {
+		g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} rejected by Player::changeOutfit", player->getName());
 		return;
 	}
 
@@ -6518,25 +6552,30 @@ void Game::playerChangeOutfit(uint32_t playerId, Outfit_t outfit, bool isMounted
 
 	const auto playerOutfit = Outfits::getInstance().getOutfitByLookType(player, outfit.lookType);
 	if (!playerOutfit) {
+		g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} lookType={} not found in Outfits map, clearing mount", player->getName(), outfit.lookType);
 		outfit.lookMount = 0;
 	}
 
 	if (outfit.lookMount != 0) {
 		const auto mount = mounts->getMountByClientID(outfit.lookMount);
 		if (!mount) {
+			g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} mountClientId={} not found", player->getName(), outfit.lookMount);
 			return;
 		}
 
 		if (!player->hasMount(mount)) {
+			g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} does not own mount id={} clientId={}", player->getName(), static_cast<uint16_t>(mount->id), mount->clientId);
 			return;
 		}
 
 		std::shared_ptr<Tile> playerTile = player->getTile();
 		if (!playerTile) {
+			g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} has no tile", player->getName());
 			return;
 		}
 
 		if (!g_configManager().getBoolean(TOGGLE_MOUNT_IN_PZ) && playerTile->hasFlag(TILESTATE_PROTECTIONZONE)) {
+			g_logger().info("[OutfitTrace][Server][playerChangeOutfit] player={} in PZ with TOGGLE_MOUNT_IN_PZ=false, clearing mount", player->getName());
 			outfit.lookMount = 0;
 		}
 
@@ -6568,6 +6607,17 @@ void Game::playerChangeOutfit(uint32_t playerId, Outfit_t outfit, bool isMounted
 		}
 
 		internalCreatureChangeOutfit(player, outfit);
+		g_logger().info("[OutfitTrace][Server][playerChangeOutfit][applied] player={} lookType={} addons={} mount={} mounted={}",
+			player->getName(),
+			outfit.lookType,
+			static_cast<uint16_t>(outfit.lookAddons),
+			outfit.lookMount,
+			player->isMounted() ? 1 : 0);
+	} else {
+		g_logger().warn("[OutfitTrace][Server][playerChangeOutfit] player={} canWearOutfit=false lookType={} addons={}",
+			player->getName(),
+			outfit.lookType,
+			static_cast<uint16_t>(outfit.lookAddons));
 	}
 
 	auto &playerAttachedEffects = player->attachedEffects();
@@ -9905,21 +9955,41 @@ void Game::playerNpcGreet(uint32_t playerId, uint32_t npcId) {
 void Game::playerLeaveMarket(uint32_t playerId) {
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[MarketTrace][Server][Game][playerLeaveMarket] playerId={} not found", playerId);
 		return;
 	}
 
+	g_logger().info("[MarketTrace][Server][Game][playerLeaveMarket] player={} id={} inMarketBefore={}",
+				player->getName(),
+				playerId,
+				player->isInMarket() ? 1 : 0);
+
 	player->setInMarket(false);
+	g_logger().info("[MarketTrace][Server][Game][playerLeaveMarket] player={} id={} inMarketAfter={}",
+				player->getName(),
+				playerId,
+				player->isInMarket() ? 1 : 0);
 }
 
 void Game::playerBrowseMarket(uint32_t playerId, uint16_t itemId, uint8_t tier) {
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarket] playerId={} not found", playerId);
 		return;
 	}
 
 	if (!player->isInMarket()) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarket] player={} blocked: inMarket=0 itemId={} tier={}",
+				player->getName(),
+				itemId,
+				static_cast<uint16_t>(tier));
 		return;
 	}
+
+	g_logger().info("[MarketTrace][Server][Game][playerBrowseMarket] player={} itemId={} tier={} inMarket=1",
+				player->getName(),
+				itemId,
+				static_cast<uint16_t>(tier));
 
 	const ItemType &it = Item::items[itemId];
 	if (it.id == 0) {
@@ -9939,12 +10009,16 @@ void Game::playerBrowseMarket(uint32_t playerId, uint16_t itemId, uint8_t tier) 
 void Game::playerBrowseMarketOwnOffers(uint32_t playerId) {
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarketOwnOffers] playerId={} not found", playerId);
 		return;
 	}
 
 	if (!player->isInMarket()) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarketOwnOffers] player={} blocked: inMarket=0", player->getName());
 		return;
 	}
+
+	g_logger().info("[MarketTrace][Server][Game][playerBrowseMarketOwnOffers] player={} inMarket=1", player->getName());
 
 	const MarketOfferList &buyOffers = IOMarket::getOwnOffers(MARKETACTION_BUY, player->getGUID());
 	const MarketOfferList &sellOffers = IOMarket::getOwnOffers(MARKETACTION_SELL, player->getGUID());
@@ -9954,12 +10028,16 @@ void Game::playerBrowseMarketOwnOffers(uint32_t playerId) {
 void Game::playerBrowseMarketOwnHistory(uint32_t playerId) {
 	const auto &player = getPlayerByID(playerId);
 	if (!player) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarketOwnHistory] playerId={} not found", playerId);
 		return;
 	}
 
 	if (!player->isInMarket()) {
+		g_logger().warn("[MarketTrace][Server][Game][playerBrowseMarketOwnHistory] player={} blocked: inMarket=0", player->getName());
 		return;
 	}
+
+	g_logger().info("[MarketTrace][Server][Game][playerBrowseMarketOwnHistory] player={} inMarket=1", player->getName());
 
 	const HistoryMarketOfferList &buyOffers = IOMarket::getOwnHistory(MARKETACTION_BUY, player->getGUID());
 	const HistoryMarketOfferList &sellOffers = IOMarket::getOwnHistory(MARKETACTION_SELL, player->getGUID());
@@ -10270,7 +10348,7 @@ void Game::playerCreateMarketOffer(uint32_t playerId, uint8_t type, uint16_t ite
 		return;
 	}
 
-	IOMarket::createOffer(player->getGUID(), static_cast<MarketAction_t>(type), it.id, amount, price, tier, anonymous);
+	IOMarket::createOffer(player->getGUID(), player->getWorldId(), static_cast<MarketAction_t>(type), it.id, amount, price, tier, anonymous);
 
 	const MarketOfferList &buyOffers = IOMarket::getActiveOffers(MARKETACTION_BUY, it.id, tier);
 	const MarketOfferList &sellOffers = IOMarket::getActiveOffers(MARKETACTION_SELL, it.id, tier);

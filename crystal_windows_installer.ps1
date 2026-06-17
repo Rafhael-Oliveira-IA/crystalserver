@@ -246,6 +246,36 @@ if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdenti
     exit 1
 }
 
+function Get-VisualStudioWithCppTools {
+    $vswherePath = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswherePath) {
+        $vsPath = & $vswherePath -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if ($LASTEXITCODE -eq 0 -and $vsPath) {
+            $vsPath = ($vsPath | Select-Object -First 1).Trim()
+            $vcVars = Join-Path $vsPath "VC\Auxiliary\Build\vcvarsall.bat"
+            if (Test-Path $vcVars) {
+                return $vsPath
+            }
+        }
+    }
+
+    $fallbackPaths = @(
+        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Professional",
+        "${env:ProgramFiles}\Microsoft Visual Studio\2022\Enterprise",
+        "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
+    )
+
+    foreach ($candidate in $fallbackPaths) {
+        $vcVars = Join-Path $candidate "VC\Auxiliary\Build\vcvarsall.bat"
+        if (Test-Path $vcVars) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
 # --- Krok 1: Instalacja GIT ---
 Write-Host ""
 Write-Host $lang.Step1Title -ForegroundColor Green
@@ -293,6 +323,13 @@ if (-not (Test-Path $vsInstallerPath)) {
 } else {
     Write-Host "Visual Studio $($lang.CheckFound)"
     Write-Warning $lang.VSWarning
+
+    $detectedVsPath = Get-VisualStudioWithCppTools
+    if ($null -eq $detectedVsPath) {
+        Write-Warning "No valid Visual Studio instance with C++ tools was found yet. Install 'Desktop development with C++' in Visual Studio Installer, then re-run this script."
+    } else {
+        Write-Host "Visual Studio C++ toolchain detected at: $detectedVsPath" -ForegroundColor Cyan
+    }
 }
 
 
@@ -343,6 +380,14 @@ try {
         Write-Host $lang.Step5Exists
         Set-Location $VcpkgRoot
     }
+
+    $detectedVsPath = Get-VisualStudioWithCppTools
+    if ($null -eq $detectedVsPath) {
+        throw "Unable to find a complete Visual Studio instance with C++ tools. Open Visual Studio Installer and install 'Desktop development with C++'."
+    }
+
+    $env:VCPKG_VISUAL_STUDIO_PATH = $detectedVsPath
+    Write-Host "Using Visual Studio for vcpkg: $detectedVsPath" -ForegroundColor Cyan
 
     Write-Host $lang.Step5InstallLibs
     ./vcpkg install openssl:x64-windows boost:x64-windows

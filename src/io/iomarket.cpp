@@ -307,10 +307,10 @@ MarketOfferEx IOMarket::getOfferByCounter(uint32_t timestamp, uint16_t counter) 
 	return offer;
 }
 
-void IOMarket::createOffer(uint32_t playerId, MarketAction_t action, uint32_t itemId, uint16_t amount, uint64_t price, uint8_t tier, bool anonymous) {
+void IOMarket::createOffer(uint32_t playerId, uint8_t worldId, MarketAction_t action, uint32_t itemId, uint16_t amount, uint64_t price, uint8_t tier, bool anonymous) {
 	std::string query = fmt::format(
 		"INSERT INTO `market_offers` (`player_id`, `sale`, `itemtype`, `amount`, `created`, `anonymous`, `price`, `tier`, `world_id`) VALUES ({}, {}, {}, {}, {}, {}, {}, {}, {})",
-		playerId, action, itemId, amount, getTimeNow(), anonymous, price, std::to_string(tier), g_game().worlds().getCurrentWorld()->id
+		playerId, action, itemId, amount, getTimeNow(), anonymous, price, std::to_string(tier), worldId
 	);
 	Database::getInstance().executeQuery(query);
 }

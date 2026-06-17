@@ -6639,7 +6639,20 @@ void Player::changeSoul(int32_t soulChange) {
 
 bool Player::changeOutfit(Outfit_t outfit, bool checkList) {
 	auto outfitId = Outfits::getInstance().getOutfitId(getSex(), outfit.lookType);
-	if (checkList && (!canWearOutfit(outfitId, outfit.lookAddons) || !requestedOutfit)) {
+	const bool canWearRequested = canWearOutfit(outfitId, outfit.lookAddons);
+	g_logger().info("[OutfitTrace][Server][Player::changeOutfit] player={} lookType={} outfitId={} addons={} checkList={} requestedOutfit={}",
+		getName(),
+		outfit.lookType,
+		outfitId,
+		static_cast<uint16_t>(outfit.lookAddons),
+		checkList ? 1 : 0,
+		requestedOutfit ? 1 : 0);
+
+	if (checkList && (!canWearRequested || !requestedOutfit)) {
+		g_logger().warn("[OutfitTrace][Server][Player::changeOutfit] player={} rejected: canWear={} requestedOutfit={}",
+			getName(),
+			canWearRequested ? 1 : 0,
+			requestedOutfit ? 1 : 0);
 		return false;
 	}
 
@@ -6673,6 +6686,11 @@ bool Player::canWearOutfit(uint16_t lookType, uint8_t addons) const {
 
 	const auto &outfit = Outfits::getInstance().getOutfitByLookType(getPlayer(), lookType);
 	if (!outfit) {
+		g_logger().warn("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} rejected: not found in outfits.xml for sex={}",
+			getName(),
+			lookType,
+			static_cast<uint16_t>(addons),
+			static_cast<uint16_t>(getSex()));
 		return false;
 	}
 
@@ -6681,21 +6699,65 @@ bool Player::canWearOutfit(uint16_t lookType, uint8_t addons) const {
 	}
 
 	if (outfit->premium && !isPremium()) {
+		g_logger().warn("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} rejected: premium required", getName(), lookType);
 		return false;
 	}
 
 	if (outfit->unlocked && addons == 0) {
+		g_logger().info("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} accepted: unlocked base outfit", getName(), lookType);
 		return true;
 	}
 
 	for (const auto &outfitEntry : outfitsMap) {
 		if (outfitEntry.lookType == lookType) {
 			if (outfitEntry.addons == addons || outfitEntry.addons == 3 || addons == 0) {
+				g_logger().info("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} accepted via outfitsMap entryAddons={}",
+					getName(),
+					lookType,
+					static_cast<uint16_t>(addons),
+					static_cast<uint16_t>(outfitEntry.addons));
 				return true;
 			}
+			g_logger().warn("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} rejected: owned lookType but missing addons (entryAddons={})",
+				getName(),
+				lookType,
+				static_cast<uint16_t>(addons),
+				static_cast<uint16_t>(outfitEntry.addons));
 			return false; // have lookType on list and addons don't match
 		}
 	}
+
+	// Compatibility fallback: some unlock sources can persist the opposite-sex lookType.
+	if (const auto &oppositeOutfit = Outfits::getInstance().getOutfitByLookType(getPlayer(), lookType, true)) {
+		for (const auto &outfitEntry : outfitsMap) {
+			if (outfitEntry.lookType != oppositeOutfit->lookType) {
+				continue;
+			}
+
+			if (outfitEntry.addons == addons || outfitEntry.addons == 3 || addons == 0) {
+				g_logger().info("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} accepted via opposite-sex entry lookType={} entryAddons={}",
+						getName(),
+						lookType,
+						static_cast<uint16_t>(addons),
+						oppositeOutfit->lookType,
+						static_cast<uint16_t>(outfitEntry.addons));
+				return true;
+			}
+
+			g_logger().warn("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} rejected: opposite-sex entry present but missing addons (entryLookType={} entryAddons={})",
+					getName(),
+					lookType,
+					static_cast<uint16_t>(addons),
+					oppositeOutfit->lookType,
+					static_cast<uint16_t>(outfitEntry.addons));
+			return false;
+		}
+	}
+
+	g_logger().warn("[OutfitTrace][Server][Player::canWearOutfit] player={} lookType={} addons={} rejected: lookType not present in player outfitsMap",
+		getName(),
+		lookType,
+		static_cast<uint16_t>(addons));
 	return false;
 }
 
@@ -6772,6 +6834,14 @@ void Player::setSpecialMenuAvailable(bool stashBool, bool marketMenuBool, bool d
 }
 
 void Player::addOutfit(uint16_t lookType, uint8_t addons) {
+	if (const auto &currentSexOutfit = Outfits::getInstance().getOutfitByLookType(getPlayer(), lookType); !currentSexOutfit) {
+		if (const auto &oppositeOutfit = Outfits::getInstance().getOutfitByLookType(getPlayer(), lookType, true)) {
+			if (const auto &normalizedOutfit = Outfits::getInstance().getOutfitByName(getSex(), oppositeOutfit->name)) {
+				lookType = normalizedOutfit->lookType;
+			}
+		}
+	}
+
 	for (auto &outfitEntry : outfitsMap) {
 		if (outfitEntry.lookType == lookType) {
 			setOutfitsModified(true);
