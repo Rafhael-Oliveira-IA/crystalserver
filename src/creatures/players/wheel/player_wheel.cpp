@@ -1370,6 +1370,11 @@ void PlayerWheel::toggleGemLock(uint16_t index) {
 }
 
 void PlayerWheel::setActiveGem(WheelGemAffinity_t affinity, uint16_t index) {
+	if (index == std::numeric_limits<uint16_t>::max()) {
+		removeActiveGem(affinity);
+		return;
+	}
+
 	auto &gem = getGem(index);
 	if (!gem) {
 		g_logger().error("[{}] Failed to load gem with index {}", __FUNCTION__, index);
